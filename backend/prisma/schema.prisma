@@ -1,0 +1,211 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  PROJECT_MANAGER
+  DEVELOPER
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_IN_REVIEW
+  TASK_OVERDUE
+  PROJECT_CREATED
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  createdProjects  Project[]      @relation("ProjectCreatedBy")
+  assignedTasks    Task[]         @relation("TaskAssignedTo")
+  activities       TaskActivity[] @relation("ActivityUser")
+  notifications    Notification[] @relation("NotificationRecipient")
+  refreshTokens    RefreshToken[]
+  projectMembers   ProjectMember[]
+
+  @@index([role])
+  @@index([email])
+  @@map("users")
+}
+
+model Client {
+  id        String   @id @default(uuid())
+  name      String
+  email     String?
+  phone     String?
+  company   String?
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  projects Project[]
+
+  @@index([name])
+  @@map("clients")
+}
+
+model Project {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  clientId    String
+  createdById String   // Authoritative PM ownership field
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  client      Client          @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  createdBy   User            @relation("ProjectCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  tasks       Task[]
+  activities  TaskActivity[]
+  members     ProjectMember[]
+  notifications Notification[] @relation("NotificationProject")
+
+  @@index([createdById])
+  @@index([clientId])
+  @@map("projects")
+}
+
+model ProjectMember {
+  id        String   @id @default(uuid())
+  projectId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  // Relations
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([projectId])
+  @@index([userId])
+  @@map("project_members")
+}
+
+model Task {
+  id                  String     @id @default(uuid())
+  projectId           String
+  title               String
+  description         String?
+  assignedDeveloperId String?
+  status              TaskStatus @default(TODO)
+  priority            Priority   @default(MEDIUM)
+  dueDate             DateTime?
+  isOverdue           Boolean    @default(false)
+  overdueNotifiedAt   DateTime?  // Tracks when overdue notification was sent to prevent duplicates
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  // Relations
+  project           Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignedDeveloper User?          @relation("TaskAssignedTo", fields: [assignedDeveloperId], references: [id], onDelete: SetNull)
+  activities        TaskActivity[]
+  notifications     Notification[] @relation("NotificationTask")
+
+  // Composite indexes for frequent query patterns
+  @@index([projectId, status])
+  @@index([assignedDeveloperId, status])
+  @@index([dueDate, status])             // For overdue job: WHERE dueDate < NOW() AND status != DONE
+  @@index([projectId, priority])
+  @@index([projectId, dueDate])
+  @@index([isOverdue, status])           // For overdue count on dashboards
+  @@map("tasks")
+}
+
+model TaskActivity {
+  id        String     @id @default(uuid())
+  taskId    String
+  projectId String     // Denormalized for efficient role-based feed queries
+  userId    String
+  oldStatus TaskStatus?
+  newStatus TaskStatus?
+  action    String     // e.g. "STATUS_CHANGED", "CREATED", "ASSIGNED", "OVERDUE_FLAGGED"
+  metadata  Json?      // Extra context (e.g. { assignedTo: "userName" })
+  createdAt DateTime   @default(now())
+
+  // Relations
+  task    Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation("ActivityUser", fields: [userId], references: [id], onDelete: Restrict)
+
+  // Composite indexes for role-filtered activity feed queries
+  @@index([projectId, createdAt])        // PM feed: WHERE projectId IN (owned projects) ORDER BY createdAt DESC
+  @@index([taskId, createdAt])           // Developer feed: WHERE taskId IN (assigned tasks) ORDER BY createdAt DESC
+  @@index([createdAt])                   // Admin global feed
+  @@index([userId, createdAt])
+  @@map("task_activities")
+}
+
+model Notification {
+  id               String           @id @default(uuid())
+  recipientId      String
+  type             NotificationType
+  message          String
+  relatedTaskId    String?
+  relatedProjectId String?
+  isRead           Boolean          @default(false)
+  readAt           DateTime?
+  createdAt        DateTime         @default(now())
+
+  // Relations
+  recipient       User     @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  relatedTask     Task?    @relation("NotificationTask", fields: [relatedTaskId], references: [id], onDelete: SetNull)
+  relatedProject  Project? @relation("NotificationProject", fields: [relatedProjectId], references: [id], onDelete: SetNull)
+
+  // Composite indexes for notification queries
+  @@index([recipientId, isRead])         // Unread count: WHERE recipientId = ? AND isRead = false
+  @@index([recipientId, createdAt])      // Notification list ordered by time
+  @@map("notifications")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique  // bcrypt hash of raw token — raw token only lives in HttpOnly cookie
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}
