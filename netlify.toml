@@ -1,0 +1,12 @@
+# Netlify Configuration for Velozity Global Solutions SPA
+
+[build]
+  base = "frontend"
+  publish = "dist"
+  command = "npm run build"
+
+# SPA Fallback: Rewrite all client-side routes to index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
